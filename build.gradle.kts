@@ -35,7 +35,8 @@ cmaker {
             arrayOf(
                 "-DEXTERNAL_ROOT=${File(rootDir.absolutePath, "external")}",
                 "-DCORE_ROOT=${File(rootDir.absolutePath, "core/src/main/jni")}",
-                "-DANDROID_STL=none"
+                "-DANDROID_STL=none",
+                "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
             )
         )
         val flags = arrayOf(
@@ -67,11 +68,11 @@ val defaultManagerPackageName by extra("com.google.android.lspmngr")
 val apiCode by extra(93)
 val verCode by extra(commitCount)
 val verName by extra(latestTag)
-val androidTargetSdkVersion by extra(34)
+val androidTargetSdkVersion by extra(35)
 val androidMinSdkVersion by extra(27)
-val androidBuildToolsVersion by extra("34.0.0")
-val androidCompileSdkVersion by extra(34)
-val androidCompileNdkVersion by extra("26.3.11579264")
+val androidBuildToolsVersion by extra("35.0.0")
+val androidCompileSdkVersion by extra(35)
+val androidCompileNdkVersion by extra("27.0.12077973")
 val androidSourceCompatibility by extra(JavaVersion.VERSION_21)
 val androidTargetCompatibility by extra(JavaVersion.VERSION_21)
 
@@ -89,6 +90,7 @@ subprojects {
             externalNativeBuild {
                 cmake {
                     version = "3.28.1+"
+                    buildStagingDirectory = layout.buildDirectory.get().asFile
                 }
             }
 

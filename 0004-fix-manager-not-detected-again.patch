@@ -1,0 +1,26 @@
+From 99fda0921bba096f75c6243ef7cc0a83232159f5 Mon Sep 17 00:00:00 2001
+From: 5ec1cff <ewtqyqyewtqyqy@gmail.com>
+Date: Sun, 28 Jan 2024 11:07:48 +0800
+Subject: [PATCH 04/11] fix manager not detected again
+
+---
+ .../src/main/java/org/lsposed/lspd/service/ConfigManager.java  | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/daemon/src/main/java/org/lsposed/lspd/service/ConfigManager.java b/daemon/src/main/java/org/lsposed/lspd/service/ConfigManager.java
+index 7379080f..a368a28f 100644
+--- a/daemon/src/main/java/org/lsposed/lspd/service/ConfigManager.java
++++ b/daemon/src/main/java/org/lsposed/lspd/service/ConfigManager.java
+@@ -766,6 +766,9 @@ public class ConfigManager {
+                 setAccessMatrixAppId(appId, true);
+             }
+         });
++        if (managerUid != -1) {
++            setAccessMatrixAppId(managerUid, true);
++        }
+     }
+ 
+     // This is called when a new process created, use the cached result
+-- 
+2.45.2
+

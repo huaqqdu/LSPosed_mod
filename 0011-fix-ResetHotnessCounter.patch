@@ -1,0 +1,19 @@
+From 013555fe5406a6d3c27e03e20d599d4e87127850 Mon Sep 17 00:00:00 2001
+From: 5ec1cff <ewtqyqyewtqyqy@gmail.com>
+Date: Wed, 26 Jun 2024 21:57:26 +0800
+Subject: [PATCH 11/11] fix ResetHotnessCounter
+
+---
+ external/lsplant | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/external/lsplant b/external/lsplant
+index a6125221..7a08c387 160000
+--- a/external/lsplant
++++ b/external/lsplant
+@@ -1 +1 @@
+-Subproject commit a612522188d903a523fc6760cd4ee257c3224d8c
++Subproject commit 7a08c38727aa741d4e7581e1156df0ec880642f0
+-- 
+2.45.2
+

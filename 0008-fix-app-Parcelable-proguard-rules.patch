@@ -1,0 +1,24 @@
+From b9c5dc608d09c60de25cb905a2cba8e76c4bfa40 Mon Sep 17 00:00:00 2001
+From: 5ec1cff <ewtqyqyewtqyqy@gmail.com>
+Date: Sat, 17 Feb 2024 17:22:21 +0800
+Subject: [PATCH 08/11] fix app Parcelable proguard rules
+
+---
+ app/proguard-rules.pro | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/app/proguard-rules.pro b/app/proguard-rules.pro
+index e1794af5..fc0df121 100644
+--- a/app/proguard-rules.pro
++++ b/app/proguard-rules.pro
+@@ -32,3 +32,7 @@
+ -dontwarn org.openjsse.javax.net.ssl.SSLParameters
+ -dontwarn org.openjsse.javax.net.ssl.SSLSocket
+ -dontwarn org.openjsse.net.ssl.OpenJSSE
++
++-keepclassmembers class * implements android.os.Parcelable {
++    public static final ** CREATOR;
++}
+-- 
+2.45.2
+

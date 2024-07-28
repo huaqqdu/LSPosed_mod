@@ -1,0 +1,25 @@
+From f63036732012df46171922027c9077f7951f5ec4 Mon Sep 17 00:00:00 2001
+From: 5ec1cff <ewtqyqyewtqyqy@gmail.com>
+Date: Wed, 26 Jun 2024 21:15:13 +0800
+Subject: [PATCH 09/11] use Theme_DeviceDefault_Settings
+
+---
+ .../org/lsposed/lspd/util/ParasiticManagerSystemHooker.java     | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/magisk-loader/src/main/java/org/lsposed/lspd/util/ParasiticManagerSystemHooker.java b/magisk-loader/src/main/java/org/lsposed/lspd/util/ParasiticManagerSystemHooker.java
+index 2ee5c6ab..1b2df4ae 100644
+--- a/magisk-loader/src/main/java/org/lsposed/lspd/util/ParasiticManagerSystemHooker.java
++++ b/magisk-loader/src/main/java/org/lsposed/lspd/util/ParasiticManagerSystemHooker.java
+@@ -46,7 +46,7 @@ public class ParasiticManagerSystemHooker implements HandleSystemServerProcessHo
+             // use a different process name
+             aInfo.processName = "org.lsposed.manager";
+             // choose a theme that has transition animation
+-            aInfo.theme = android.R.style.Theme_Material_Light_NoActionBar;
++            aInfo.theme = android.R.style.Theme_DeviceDefault_Settings;
+             // remove some annoying flags
+             aInfo.flags = aInfo.flags & ~(ActivityInfo.FLAG_EXCLUDE_FROM_RECENTS | ActivityInfo.FLAG_FINISH_ON_CLOSE_SYSTEM_DIALOGS);
+             BridgeService.getService().preStartManager();
+-- 
+2.45.2
+

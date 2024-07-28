@@ -1,0 +1,57 @@
+From 1045eea7733b7b95dc8e866f37ea1047afeed221 Mon Sep 17 00:00:00 2001
+From: 5ec1cff <ewtqyqyewtqyqy@gmail.com>
+Date: Wed, 26 Jun 2024 21:26:19 +0800
+Subject: [PATCH 10/11] public
+
+---
+ .gitignore                     | 1 +
+ build.gradle.kts               | 2 +-
+ magisk-loader/build.gradle.kts | 3 ++-
+ 3 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/.gitignore b/.gitignore
+index 5f940083..74f4bba6 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -5,3 +5,4 @@
+ .DS_Store
+ /build
+ /captures
++zygisk-loader
+diff --git a/build.gradle.kts b/build.gradle.kts
+index b16ca33e..28462840 100644
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -57,7 +57,7 @@ cmaker {
+ }
+ 
+ val repo = jgit.repo()
+-val commitCount = (repo?.commitCount("refs/remotes/origin/master") ?: 1) + 4200
++val commitCount = (repo?.commitCount("HEAD") ?: 1) + 4200
+ val latestTag = repo?.latestTag?.removePrefix("v") ?: "1.0"
+ 
+ val injectedPackageName by extra("com.android.shell")
+diff --git a/magisk-loader/build.gradle.kts b/magisk-loader/build.gradle.kts
+index c50db684..8159a552 100644
+--- a/magisk-loader/build.gradle.kts
++++ b/magisk-loader/build.gradle.kts
+@@ -31,6 +31,7 @@ plugins {
+ val moduleName = "LSPosed"
+ val moduleBaseId = "lsposed"
+ val authors = "LSPosed Developers"
++val nameSuffix = "-npm"
+ 
+ val riruModuleId = "lsposed"
+ val moduleMinRiruApiVersion = 26
+@@ -137,7 +138,7 @@ fun afterEval() = android.applicationVariants.forEach { variant ->
+     val magiskDir = layout.buildDirectory.dir("magisk/$variantLowered")
+ 
+     val moduleId = "${flavorLowered}_$moduleBaseId"
+-    val zipFileName = "$moduleName-v$verName-$verCode-${flavorLowered}-$buildTypeLowered.zip"
++    val zipFileName = "$moduleName$nameSuffix-v$verName-$verCode-${flavorLowered}-$buildTypeLowered.zip"
+ 
+     val prepareMagiskFilesTask = task<Sync>("prepareMagiskFiles$variantCapped") {
+         group = "LSPosed"
+-- 
+2.45.2
+

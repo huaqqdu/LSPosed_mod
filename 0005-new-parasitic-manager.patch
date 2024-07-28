@@ -1,0 +1,1058 @@
+From 45876abfaf4b20881c2bbbd039dfa70ee1b80d95 Mon Sep 17 00:00:00 2001
+From: 5ec1cff <ewtqyqyewtqyqy@gmail.com>
+Date: Wed, 7 Feb 2024 23:16:40 +0800
+Subject: [PATCH 05/11] new parasitic manager
+
+---
+ .../HandleSystemServerProcessHooker.java      |   6 +
+ .../lsposed/lspd/service/ConfigManager.java   |   4 +-
+ .../lspd/service/LSPManagerService.java       | 138 ++--------
+ .../lsposed/lspd/service/LSPosedService.java  |  16 +-
+ .../main/java/org/lsposed/lspd/core/Main.java |   7 +-
+ .../lspd/service/ActivityController.java      | 260 ------------------
+ .../lsposed/lspd/service/BridgeService.java   |  56 +---
+ .../lspd/util/ParasiticManagerHooker.java     |  29 --
+ .../util/ParasiticManagerSystemHooker.java    |  77 ++++++
+ magisk-loader/src/main/jni/api/riru_main.cpp  |   1 +
+ .../src/main/jni/src/magisk_loader.cpp        |  77 +++---
+ .../src/main/jni/src/magisk_loader.h          |   2 +-
+ magisk-loader/src/main/jni/src/service.cpp    |  34 ---
+ magisk-loader/src/main/jni/src/service.h      |   2 -
+ .../lsposed/lspd/service/ILSPosedService.aidl |   4 +-
+ 15 files changed, 175 insertions(+), 538 deletions(-)
+ delete mode 100644 magisk-loader/src/main/java/org/lsposed/lspd/service/ActivityController.java
+ create mode 100644 magisk-loader/src/main/java/org/lsposed/lspd/util/ParasiticManagerSystemHooker.java
+
+diff --git a/core/src/main/java/org/lsposed/lspd/hooker/HandleSystemServerProcessHooker.java b/core/src/main/java/org/lsposed/lspd/hooker/HandleSystemServerProcessHooker.java
+index 1aefebef..4552153e 100644
+--- a/core/src/main/java/org/lsposed/lspd/hooker/HandleSystemServerProcessHooker.java
++++ b/core/src/main/java/org/lsposed/lspd/hooker/HandleSystemServerProcessHooker.java
+@@ -34,7 +34,12 @@ import io.github.libxposed.api.annotations.XposedHooker;
+ @XposedHooker
+ public class HandleSystemServerProcessHooker implements XposedInterface.Hooker {
+ 
++    public interface Callback {
++        void onSystemServerLoaded(ClassLoader classLoader);
++    }
++
+     public static volatile ClassLoader systemServerCL;
++    public static volatile Callback callback = null;
+ 
+     @SuppressLint("PrivateApi")
+     @AfterInvocation
+@@ -47,6 +52,7 @@ public class HandleSystemServerProcessHooker implements XposedInterface.Hooker {
+             PrebuiltMethodsDeopter.deoptSystemServerMethods(systemServerCL);
+             var clazz = Class.forName("com.android.server.SystemServer", false, systemServerCL);
+             LSPosedHelper.hookAllMethods(StartBootstrapServicesHooker.class, clazz, "startBootstrapServices");
++            if (callback != null) callback.onSystemServerLoaded(systemServerCL);
+         } catch (Throwable t) {
+             Hookers.logE("error when hooking systemMain", t);
+         }
+diff --git a/daemon/src/main/java/org/lsposed/lspd/service/ConfigManager.java b/daemon/src/main/java/org/lsposed/lspd/service/ConfigManager.java
+index a368a28f..ccded9de 100644
+--- a/daemon/src/main/java/org/lsposed/lspd/service/ConfigManager.java
++++ b/daemon/src/main/java/org/lsposed/lspd/service/ConfigManager.java
+@@ -206,9 +206,11 @@ public class ConfigManager {
+             Log.e(TAG, "skip injecting into android because sepolicy was not loaded properly");
+             return true; // skip
+         }
++        /*
+         try (Cursor cursor = db.query("scope INNER JOIN modules ON scope.mid = modules.mid", new String[]{"modules.mid"}, "app_pkg_name=? AND enabled=1", new String[]{"system"}, null, null, null)) {
+             return cursor == null || !cursor.moveToNext();
+-        }
++        }*/
++        return false;
+     }
+ 
+     @SuppressLint("BlockedPrivateApi")
+diff --git a/daemon/src/main/java/org/lsposed/lspd/service/LSPManagerService.java b/daemon/src/main/java/org/lsposed/lspd/service/LSPManagerService.java
+index b1882560..9c164204 100644
+--- a/daemon/src/main/java/org/lsposed/lspd/service/LSPManagerService.java
++++ b/daemon/src/main/java/org/lsposed/lspd/service/LSPManagerService.java
+@@ -21,7 +21,6 @@ package org.lsposed.lspd.service;
+ 
+ import static android.content.Context.BIND_AUTO_CREATE;
+ import static org.lsposed.lspd.service.ServiceManager.TAG;
+-import static org.lsposed.lspd.service.ServiceManager.getExecutorService;
+ 
+ import android.annotation.SuppressLint;
+ import android.app.IServiceConnection;
+@@ -59,7 +58,6 @@ import java.io.FileOutputStream;
+ import java.io.IOException;
+ import java.util.LinkedList;
+ import java.util.List;
+-import java.util.UUID;
+ import java.util.concurrent.TimeUnit;
+ 
+ import hidden.HiddenApiBridge;
+@@ -67,10 +65,9 @@ import io.github.libxposed.service.IXposedService;
+ import rikka.parcelablelist.ParcelableListSlice;
+ 
+ public class LSPManagerService extends ILSPManagerService.Stub {
+-    // this maybe useful when obtaining the manager binder
+-    private static String RANDOM_UUID = null;
+ 
+     private static Intent managerIntent = null;
++    private boolean enabled = true;
+ 
+     public class ManagerGuard implements IBinder.DeathRecipient {
+         private final @NonNull
+@@ -163,7 +160,11 @@ public class LSPManagerService extends ILSPManagerService.Stub {
+         if (intent == null) return;
+         intent = new Intent(intent);
+         intent.setData(withData);
+-        ServiceManager.getManagerService().preStartManager(BuildConfig.MANAGER_INJECTED_PKG_NAME, intent, true);
++        try {
++            ActivityManagerService.startActivityAsUserWithFeature("android", null, intent, intent.getType(), null, null, 0, 0, null, null, 0);
++        } catch (RemoteException e) {
++            Log.e(TAG, "failed to open manager");
++        }
+     }
+ 
+     @SuppressLint("WrongConstant")
+@@ -188,11 +189,6 @@ public class LSPManagerService extends ILSPManagerService.Stub {
+         }
+     }
+ 
+-    public ManagerGuard guardSnapshot() {
+-        var snapshot = guard;
+-        return snapshot != null && snapshot.isAlive() ? snapshot : null;
+-    }
+-
+     private void ensureWebViewPermission(File f) {
+         if (!f.exists()) return;
+         SELinux.setFileContext(f.getAbsolutePath(), "u:object_r:magisk_file:s0");
+@@ -222,136 +218,46 @@ public class LSPManagerService extends ILSPManagerService.Stub {
+         }
+     }
+ 
+-    // To start injected manager, we should take care about conflict
+-    // with the target app since we won't inject into it
+-    // if we are not going to display manager.
+-    // Thus, when someone launching manager, we should no matter
+-    // stop any process of the target app
+-    // Ideally we should call force stop package here,
+-    // however it's not feasible because it will cause deadlock
+-    // Thus we will cancel the launch of the activity
+-    // and manually start activity with force stopping
+-    // However, the intent we got here is not complete since
+-    // there's no extras. We cannot do the same thing
+-    // where starting the target app while the manager is
+-    // still running.
+-    // We instead let the manager to restart the activity.
+-    synchronized boolean preStartManager(String pkgName, Intent intent, boolean doResume) {
+-        // first, check if it's our target app, if not continue the start
+-        if (BuildConfig.MANAGER_INJECTED_PKG_NAME.equals(pkgName)) {
+-            Log.d(TAG, "starting target app of parasitic manager");
+-            // check if it's launching our manager
+-            if (intent.getCategories() != null &&
+-                    intent.getCategories().contains("org.lsposed.manager.LAUNCH_MANAGER")) {
+-                Log.d(TAG, "requesting launch of manager");
+-                // a new launch for the manager
+-                // check if there's one running
+-                // or it's run by ourselves after force stopping
+-                var snapshot = guardSnapshot();
+-                if ((RANDOM_UUID != null && intent.getCategories().contains(RANDOM_UUID)) ||
+-                        (snapshot != null && snapshot.isAlive() && snapshot.uid == BuildConfig.MANAGER_INJECTED_UID)) {
+-                    Log.d(TAG, "manager is still running or is on its way");
+-                    // there's one running parasitic manager
+-                    // or it's run by ourself after killing, resume it
+-                    if (doResume) {
+-                        // if doResume is true, we help do the resumption
+-                        try {
+-                            ActivityManagerService.startActivityAsUserWithFeature("android", null, intent, intent.getType(), null, null, 0, 0, null, null, 0);
+-                        } catch (Throwable e) {
+-                            Log.w(TAG, "resume manager", e);
+-                        }
+-                    }
+-                    return true;
+-                } else if (pendingManager) {
+-                    // Check the flag in case new launch comes before finishing
+-                    // the previous one to avoid racing.
+-                    Log.d(TAG, "manager is still on its way when new launch comes, skipping");
+-                    return false;
+-                } else {
+-                    // new parasitic manager launch, set the flag and kill
+-                    // old processes
+-                    // we do it by cancelling the launch (return false)
+-                    // and start activity in a new thread
+-                    pendingManager = true;
+-                    getExecutorService().submit(() -> {
+-                        ensureWebViewPermission();
+-                        stopAndStartActivity(pkgName, intent, true);
+-                    });
+-                    Log.d(TAG, "requested to launch manager");
+-                    return false;
+-                }
+-            } else if (pendingManager) {
+-                // there's still parasitic manager, cancel a normal launch until
+-                // the parasitic manager is launch
+-                Log.d(TAG, "previous request is not yet done");
+-                return false;
+-            }
+-            // this is a normal launch of the target app
+-            // send it to the manager and let it to restart the package
+-            // if the manager is running
+-            // or normally restart without injecting
+-            Log.d(TAG, "launching the target app normally");
+-            return true;
+-        }
++    synchronized boolean preStartManager() {
++        pendingManager = true;
++        managerPid = -1;
+         return true;
+     }
+ 
+-    synchronized void stopAndStartActivity(String packageName, Intent intent, boolean addUUID) {
+-        try {
+-            ActivityManagerService.forceStopPackage(packageName, 0);
+-            Log.d(TAG, "stopped old package");
+-            if (addUUID) {
+-                intent = new Intent(intent);
+-                RANDOM_UUID = UUID.randomUUID().toString();
+-                intent.addCategory(RANDOM_UUID);
+-            }
+-            ActivityManagerService.startActivityAsUserWithFeature("android", null, intent, intent.getType(), null, null, 0, 0, null, null, 0);
+-            Log.d(TAG, "relaunching");
+-        } catch (RemoteException e) {
+-            Log.e(TAG, "stop and start activity", e);
+-        }
+-    }
+-
+     // return true to inject manager
+     synchronized boolean shouldStartManager(int pid, int uid, String processName) {
+-        if (uid != BuildConfig.MANAGER_INJECTED_UID || !BuildConfig.MANAGER_INJECTED_PKG_NAME.equals(processName) || !pendingManager)
++        if (!enabled || uid != BuildConfig.MANAGER_INJECTED_UID || !BuildConfig.DEFAULT_MANAGER_PACKAGE_NAME.equals(processName) || !pendingManager)
+             return false;
+-        // pending parasitic manager launch it processes
+-        // now we have its pid so we allow it to be killed
+-        // and thus reset the pending flag and mark its pid
+         pendingManager = false;
+         managerPid = pid;
+         Log.d(TAG, "starting injected manager: pid = " + pid + " uid = " + uid + " processName = " + processName);
+         return true;
+     }
+ 
++    synchronized boolean setEnabled(boolean newValue) {
++        enabled = newValue;
++        Log.i(TAG, "manager enabled = " + enabled);
++        return enabled;
++    }
++
+     // return true to send manager binder
+-    synchronized boolean postStartManager(int pid, int uid) {
+-        if (pid == managerPid && uid == BuildConfig.MANAGER_INJECTED_UID) {
+-            RANDOM_UUID = null;
+-            return true;
+-        }
+-        return false;
++    boolean postStartManager(int pid, int uid) {
++        return enabled && uid == BuildConfig.MANAGER_INJECTED_UID && pid == managerPid;
+     }
+ 
+     public @NonNull
+     IBinder obtainManagerBinder(@NonNull IBinder heartbeat, int pid, int uid) {
+         new ManagerGuard(heartbeat, pid, uid);
+-        if (postStartManager(pid, uid)) {
+-            managerPid = 0;
+-        }
++        if (uid == BuildConfig.MANAGER_INJECTED_UID)
++            ensureWebViewPermission();
+         return this;
+     }
+ 
+     public boolean isRunningManager(int pid, int uid) {
+-        var snapshotPid = managerPid;
+-        var snapshotGuard = guardSnapshot();
+-        return (pid == snapshotPid && uid == BuildConfig.MANAGER_INJECTED_UID) || (snapshotGuard != null && snapshotGuard.pid == pid && snapshotGuard.uid == uid);
++        return false;
+     }
+ 
+     void onSystemServerDied() {
+-        pendingManager = false;
+-        managerPid = 0;
+         guard = null;
+     }
+ 
+@@ -564,8 +470,6 @@ public class LSPManagerService extends ILSPManagerService.Stub {
+ 
+     @Override
+     public void restartFor(Intent intent) throws RemoteException {
+-        forceStopPackage(BuildConfig.MANAGER_INJECTED_PKG_NAME, 0);
+-        stopAndStartActivity(BuildConfig.MANAGER_INJECTED_PKG_NAME, intent, false);
+     }
+ 
+     @Override
+diff --git a/daemon/src/main/java/org/lsposed/lspd/service/LSPosedService.java b/daemon/src/main/java/org/lsposed/lspd/service/LSPosedService.java
+index 85215858..157e8914 100644
+--- a/daemon/src/main/java/org/lsposed/lspd/service/LSPosedService.java
++++ b/daemon/src/main/java/org/lsposed/lspd/service/LSPosedService.java
+@@ -221,12 +221,6 @@ public class LSPosedService extends ILSPosedService.Stub {
+ 
+     private void dispatchBootCompleted(Intent intent) {
+         bootCompleted = true;
+-        try {
+-            var am = ActivityManagerService.getActivityManager();
+-            if (am != null) am.setActivityController(null, false);
+-        } catch (RemoteException e) {
+-            Log.e(TAG, "setActivityController", e);
+-        }
+         var configManager = ConfigManager.getInstance();
+         if (configManager.enableStatusNotification()) {
+             LSPNotificationManager.notifyStatusNotification();
+@@ -463,8 +457,12 @@ public class LSPosedService extends ILSPosedService.Stub {
+     }
+ 
+     @Override
+-    public boolean preStartManager(String pkgName, Intent intent) {
+-        Log.d(TAG, "checking manager intent");
+-        return ServiceManager.getManagerService().preStartManager(pkgName, intent, false);
++    public boolean preStartManager() {
++        return ServiceManager.getManagerService().preStartManager();
++    }
++
++    @Override
++    public boolean setManagerEnabled(boolean enabled) throws RemoteException {
++        return ServiceManager.getManagerService().setEnabled(enabled);
+     }
+ }
+diff --git a/magisk-loader/src/main/java/org/lsposed/lspd/core/Main.java b/magisk-loader/src/main/java/org/lsposed/lspd/core/Main.java
+index 1dfd5770..0da9f9dc 100644
+--- a/magisk-loader/src/main/java/org/lsposed/lspd/core/Main.java
++++ b/magisk-loader/src/main/java/org/lsposed/lspd/core/Main.java
+@@ -24,15 +24,18 @@ import android.os.Process;
+ 
+ import org.lsposed.lspd.service.ILSPApplicationService;
+ import org.lsposed.lspd.util.ParasiticManagerHooker;
++import org.lsposed.lspd.util.ParasiticManagerSystemHooker;
+ import org.lsposed.lspd.util.Utils;
+ import org.lsposed.lspd.BuildConfig;
+ 
+ public class Main {
+ 
+     public static void forkCommon(boolean isSystem, String niceName, String appDir, IBinder binder) {
++        if (isSystem) {
++            ParasiticManagerSystemHooker.start();
++        }
+         Startup.initXposed(isSystem, niceName, appDir, ILSPApplicationService.Stub.asInterface(binder));
+-        if ((niceName.equals(BuildConfig.MANAGER_INJECTED_PKG_NAME) || niceName.equals(BuildConfig.DEFAULT_MANAGER_PACKAGE_NAME))
+-                && ParasiticManagerHooker.start()) {
++        if (niceName.equals(BuildConfig.DEFAULT_MANAGER_PACKAGE_NAME) && ParasiticManagerHooker.start()) {
+             Utils.logI("Loaded manager, skipping next steps");
+             return;
+         }
+diff --git a/magisk-loader/src/main/java/org/lsposed/lspd/service/ActivityController.java b/magisk-loader/src/main/java/org/lsposed/lspd/service/ActivityController.java
+deleted file mode 100644
+index 0371bf1a..00000000
+--- a/magisk-loader/src/main/java/org/lsposed/lspd/service/ActivityController.java
++++ /dev/null
+@@ -1,260 +0,0 @@
+-package org.lsposed.lspd.service;
+-
+-import static org.lsposed.lspd.service.BridgeService.TAG;
+-
+-import android.annotation.SuppressLint;
+-import android.app.ActivityThread;
+-import android.app.IActivityController;
+-import android.app.IActivityManager;
+-import android.content.Context;
+-import android.content.Intent;
+-import android.os.Binder;
+-import android.os.Bundle;
+-import android.os.IBinder;
+-import android.os.Parcel;
+-import android.os.ResultReceiver;
+-import android.os.ServiceManager;
+-import android.os.ShellCallback;
+-import android.os.ShellCommand;
+-import android.util.Log;
+-
+-import androidx.annotation.NonNull;
+-
+-import org.lsposed.lspd.BuildConfig;
+-
+-import java.io.FileDescriptor;
+-import java.io.InputStream;
+-import java.io.PrintWriter;
+-import java.lang.reflect.Constructor;
+-import java.lang.reflect.InvocationHandler;
+-import java.lang.reflect.Method;
+-import java.lang.reflect.Proxy;
+-
+-public class ActivityController extends IActivityController.Stub {
+-    private static Constructor<?> myActivityControllerConstructor = null;
+-    private static Method myActivityControllerRunner = null;
+-    private static boolean inited = false;
+-    private static int fdSize = -1;
+-
+-    private static IActivityController controller = null;
+-
+-    static private ActivityController instance;
+-
+-    static {
+-        try {
+-            Context ctx = ActivityThread.currentActivityThread().getSystemContext();
+-            var systemClassLoader = ctx.getClassLoader();
+-            @SuppressLint("PrivateApi") var myActivityControllerClass = Class.forName("com.android.server.am.ActivityManagerShellCommand$MyActivityController", false, systemClassLoader);
+-            try {
+-                myActivityControllerConstructor = myActivityControllerClass.getDeclaredConstructor(IActivityManager.class, PrintWriter.class, InputStream.class,
+-                        String.class, boolean.class);
+-            } catch (NoSuchMethodException e1) {
+-                try {
+-                    myActivityControllerConstructor = myActivityControllerClass.getDeclaredConstructor(IActivityManager.class, PrintWriter.class, InputStream.class,
+-                            String.class, boolean.class, boolean.class, String.class, boolean.class);
+-                } catch (NoSuchMethodException e2) {
+-                    myActivityControllerConstructor = myActivityControllerClass.getDeclaredConstructor(IActivityManager.class, PrintWriter.class, InputStream.class,
+-                            String.class, boolean.class, boolean.class, String.class, boolean.class, boolean.class);
+-                }
+-            }
+-            myActivityControllerConstructor.setAccessible(true);
+-            myActivityControllerRunner = myActivityControllerClass.getDeclaredMethod("run");
+-            myActivityControllerRunner.setAccessible(true);
+-            var tmp = Parcel.obtain();
+-            tmp.writeFileDescriptor(FileDescriptor.in);
+-            fdSize = tmp.dataPosition();
+-            tmp.recycle();
+-            inited = true;
+-        } catch (Throwable e) {
+-            Log.e(TAG, "Failed to init ActivityController", e);
+-        }
+-    }
+-
+-    private ActivityController() {
+-        instance = this;
+-    }
+-
+-    static private @NonNull
+-    ActivityController getInstance() {
+-        if (instance == null) new ActivityController();
+-        return instance;
+-    }
+-
+-    static boolean replaceShellCommand(IBinder am, Parcel data, Parcel reply) {
+-        if (!inited) return false;
+-        try {
+-            data.setDataPosition(fdSize * 3);
+-            String[] args = data.createStringArray();
+-
+-            if (args.length > 0 && "monitor".equals(args[0])) {
+-                data.setDataPosition(0);
+-                try (var in = data.readFileDescriptor();
+-                     var out = data.readFileDescriptor();
+-                     var err = data.readFileDescriptor()) {
+-                    data.createStringArray();
+-                    ShellCallback shellCallback = ShellCallback.CREATOR.createFromParcel(data);
+-                    ResultReceiver resultReceiver = ResultReceiver.CREATOR.createFromParcel(data);
+-                    new ShellCommand() {
+-                        @Override
+-                        public int onCommand(String cmd) {
+-                            final PrintWriter pw = getOutPrintWriter();
+-                            String opt;
+-                            String gdbPort = null;
+-                            boolean monkey = false;
+-                            boolean simpleMode = false;
+-                            String target = null;
+-                            boolean alwaysContinue = false;
+-                            boolean alwaysKill = false;
+-                            while ((opt = getNextOption()) != null) {
+-                                if (opt.equals("--gdb")) {
+-                                    gdbPort = getNextArgRequired();
+-                                } else if (opt.equals("-m")) {
+-                                    monkey = true;
+-                                } else if (myActivityControllerConstructor.getParameterCount() == 8) {
+-                                    switch (opt) {
+-                                        case "-p":
+-                                            target = getNextArgRequired();
+-                                            break;
+-                                        case "-s":
+-                                            simpleMode = true;
+-                                            break;
+-                                        case "-c":
+-                                            alwaysContinue = true;
+-                                            break;
+-                                    }
+-                                } else if (myActivityControllerConstructor.getParameterCount() > 8) {
+-                                    switch (opt) {
+-                                        case "-k":
+-                                            alwaysKill = true;
+-                                            break;
+-                                    }
+-                                } else {
+-                                    getErrPrintWriter().println("Error: Unknown option: " + opt);
+-                                    return -1;
+-                                }
+-                            }
+-
+-                            return replaceMyControllerActivity(pw, getRawInputStream(), gdbPort, monkey, simpleMode, target, alwaysContinue, alwaysKill);
+-                        }
+-
+-                        @Override
+-                        public void onHelp() {
+-
+-                        }
+-                    }.exec((Binder) am, in.getFileDescriptor(), out.getFileDescriptor(), err.getFileDescriptor(), args, shellCallback, resultReceiver);
+-                } catch (Throwable e) {
+-                    Log.e(TAG, "replace shell command", e);
+-                } finally {
+-                    if (reply != null) reply.writeNoException();
+-                }
+-                return true;
+-            }
+-        } finally {
+-            data.setDataPosition(0);
+-        }
+-        return false;
+-    }
+-
+-    static boolean replaceActivityController(Parcel data) {
+-        if (!inited) return false;
+-        try {
+-            var position = data.dataPosition();
+-            var controller = replaceActivityController(IActivityController.Stub.asInterface(data.readStrongBinder()));
+-            var b = data.readInt();
+-            data.setDataSize(position);
+-            data.setDataPosition(position);
+-            data.writeStrongInterface(controller);
+-            data.writeInt(b);
+-        } catch (Throwable e) {
+-            Log.e(TAG, "replace activity controller", e);
+-        } finally {
+-            data.setDataPosition(0);
+-        }
+-        return false;
+-    }
+-
+-    static private int replaceMyControllerActivity(PrintWriter pw, InputStream stream, String gdbPort, boolean monkey, boolean simpleMode, String target, boolean alwaysContinue, boolean alwaysKill) {
+-        try {
+-            InvocationHandler handler = (proxy, method, args1) -> {
+-                if (method.getName().equals("setActivityController")) {
+-                    try {
+-                        args1[0] = replaceActivityController((IActivityController) args1[0]);
+-                    } catch (Throwable e) {
+-                        Log.e(TAG, "replace activity controller", e);
+-                    }
+-                }
+-                return method.invoke(ServiceManager.getService("activity"), args1);
+-            };
+-            var amProxy = Proxy.newProxyInstance(BridgeService.class.getClassLoader(),
+-                    new Class[]{myActivityControllerConstructor.getParameterTypes()[0]}, handler);
+-            Object ctrl;
+-            if (myActivityControllerConstructor.getParameterCount() == 5) {
+-                ctrl = myActivityControllerConstructor.newInstance(amProxy, pw, stream, gdbPort, monkey);
+-            } else if (myActivityControllerConstructor.getParameterCount() == 8){
+-                ctrl = myActivityControllerConstructor.newInstance(amProxy, pw, stream, gdbPort, monkey, simpleMode, target, alwaysContinue);
+-            } else {
+-                ctrl = myActivityControllerConstructor.newInstance(amProxy, pw, stream, gdbPort, monkey, simpleMode, target, alwaysContinue, alwaysKill);
+-            }
+-            myActivityControllerRunner.invoke(ctrl);
+-            return 0;
+-        } catch (Throwable e) {
+-            Log.e(TAG, "run monitor", e);
+-            return 1;
+-        }
+-    }
+-
+-    static private IActivityController replaceActivityController(IActivityController controller) {
+-        Log.d(TAG, "android.app.IActivityManager.setActivityController is called");
+-        ActivityController.controller = controller;
+-        return getInstance();
+-    }
+-
+-    @Override
+-    public boolean activityStarting(Intent intent, String pkg) {
+-        Log.d(TAG, "activity from " + pkg + " with " + intent + " with extras " + intent.getExtras() + " is starting");
+-        var snapshot = BridgeService.getService();
+-        if (snapshot != null && BuildConfig.MANAGER_INJECTED_PKG_NAME.equals(pkg)) {
+-            try {
+-                return snapshot.preStartManager(pkg, intent);
+-            } catch (Throwable e) {
+-                Log.e(TAG, "request manager", e);
+-            }
+-        }
+-        return controller == null || controller.activityStarting(intent, pkg);
+-    }
+-
+-    @Override
+-    public boolean activityResuming(String pkg) {
+-        return controller == null || controller.activityResuming(pkg);
+-    }
+-
+-    @Override
+-    public boolean appCrashed(String processName, int pid, String shortMsg, String longMsg, long timeMillis, String stackTrace) {
+-        return controller == null || controller.appCrashed(processName, pid, shortMsg, longMsg, timeMillis, stackTrace);
+-    }
+-
+-    @Override
+-    public int appEarlyNotResponding(String processName, int pid, String annotation) {
+-        return controller == null ? 0 : controller.appNotResponding(processName, pid, annotation);
+-    }
+-
+-    @Override
+-    public int appNotResponding(String processName, int pid, String processStats) {
+-        return controller == null ? 0 : controller.appNotResponding(processName, pid, processStats);
+-    }
+-
+-    @Override
+-    public int systemNotResponding(String msg) {
+-        return controller == null ? -1 : controller.systemNotResponding(msg);
+-    }
+-
+-    @Override
+-    public boolean moveTaskToFront(String pkg, int task, int flags, Bundle options) {
+-        return controller == null || controller.moveTaskToFront(pkg, task, flags, options);
+-    }
+-
+-    @Override
+-    public IBinder asBinder() {
+-        return this;
+-    }
+-}
+diff --git a/magisk-loader/src/main/java/org/lsposed/lspd/service/BridgeService.java b/magisk-loader/src/main/java/org/lsposed/lspd/service/BridgeService.java
+index ea88741a..45cda751 100644
+--- a/magisk-loader/src/main/java/org/lsposed/lspd/service/BridgeService.java
++++ b/magisk-loader/src/main/java/org/lsposed/lspd/service/BridgeService.java
+@@ -47,6 +47,7 @@ public class BridgeService {
+         ACTION_UNKNOWN,
+         ACTION_SEND_BINDER,
+         ACTION_GET_BINDER,
++        ACTION_ENABLE_MANAGER,
+     }
+ 
+     // for client
+@@ -149,6 +150,15 @@ public class BridgeService {
+                     }
+                     return false;
+                 }
++                case ACTION_ENABLE_MANAGER: {
++                    var uid = Binder.getCallingUid();
++                    if ((uid == 0 || uid == 2000 || uid == 1000) && service != null) {
++                        var result = service.setManagerEnabled(data.readInt() == 1);
++                        if (reply != null) reply.writeInt(result ? 1 : 0);
++                        return true;
++                    }
++                    return false;
++                }
+             }
+         } catch (Throwable e) {
+             Log.e(TAG, "onTransact", e);
+@@ -156,52 +166,6 @@ public class BridgeService {
+         return false;
+     }
+ 
+-    @SuppressWarnings("unused")
+-    public static boolean replaceShellCommand(IBinder obj, int code, long dataObj, long replyObj, int flags) {
+-        Parcel data = ParcelUtils.fromNativePointer(dataObj);
+-        Parcel reply = ParcelUtils.fromNativePointer(replyObj);
+-
+-        if (data == null || reply == null) {
+-            Log.w(TAG, "Got transaction with null data or reply");
+-            return false;
+-        }
+-
+-        try {
+-            String descriptor = obj.getInterfaceDescriptor();
+-            if (!"android.app.IActivityManager".equals(descriptor) &&
+-                    !"com.sonymobile.hookservice.HookActivityService".equals(descriptor)) {
+-                return false;
+-            }
+-            return ActivityController.replaceShellCommand(obj, data, reply);
+-        } catch (Throwable e) {
+-            Log.e(TAG, "replace shell command", e);
+-            return false;
+-        } finally {
+-            data.setDataPosition(0);
+-        }
+-    }
+-
+-    @SuppressWarnings("unused")
+-    public static boolean replaceActivityController(IBinder obj, int code, long dataObj, long replyObj, int flags) {
+-        Parcel data = ParcelUtils.fromNativePointer(dataObj);
+-        Parcel reply = ParcelUtils.fromNativePointer(replyObj);
+-
+-        if (data == null || reply == null) {
+-            Log.w(TAG, "Got transaction with null data or reply");
+-            return false;
+-        }
+-
+-        try {
+-            if (!ParcelUtils.safeEnforceInterface(data, "android.app.IActivityManager") &&
+-                    !ParcelUtils.safeEnforceInterface(data, "com.sonymobile.hookservice.HookActivityService")) {
+-                return false;
+-            }
+-            return ActivityController.replaceActivityController(data);
+-        } finally {
+-            data.setDataPosition(0);
+-        }
+-    }
+-
+     @SuppressWarnings("unused")
+     public static boolean execTransact(IBinder obj, int code, long dataObj, long replyObj, int flags) {
+         if (code != TRANSACTION_CODE) return false;
+diff --git a/magisk-loader/src/main/java/org/lsposed/lspd/util/ParasiticManagerHooker.java b/magisk-loader/src/main/java/org/lsposed/lspd/util/ParasiticManagerHooker.java
+index ca506189..7b8d52cc 100644
+--- a/magisk-loader/src/main/java/org/lsposed/lspd/util/ParasiticManagerHooker.java
++++ b/magisk-loader/src/main/java/org/lsposed/lspd/util/ParasiticManagerHooker.java
+@@ -17,15 +17,12 @@ import android.os.Build;
+ import android.os.Bundle;
+ import android.os.IBinder;
+ import android.os.PersistableBundle;
+-import android.os.Process;
+-import android.os.RemoteException;
+ import android.util.AndroidRuntimeException;
+ import android.util.ArrayMap;
+ import android.webkit.WebViewDelegate;
+ import android.webkit.WebViewFactory;
+ import android.webkit.WebViewFactoryProvider;
+ 
+-import org.lsposed.lspd.BuildConfig;
+ import org.lsposed.lspd.ILSPManagerService;
+ 
+ import java.io.FileInputStream;
+@@ -147,7 +144,6 @@ public class ParasiticManagerHooker {
+                     }
+                     if (param.args[i] instanceof Intent) {
+                         var intent = (Intent) param.args[i];
+-                        checkIntent(managerService, intent);
+                         intent.setComponent(new ComponentName(intent.getComponent().getPackageName(), "org.lsposed.manager.ui.activity.MainActivity"));
+                     }
+                 }
+@@ -247,16 +243,6 @@ public class ParasiticManagerHooker {
+             }
+         });
+ 
+-        XposedHelpers.findAndHookMethod(ActivityThread.class, "deliverNewIntents", activityClientRecordClass, List.class, new XC_MethodHook() {
+-            @Override
+-            protected void beforeHookedMethod(MethodHookParam param) {
+-                if (param.args[1] == null) return;
+-                for (var intent : (List<?>) param.args[1]) {
+-                    checkIntent(managerService, (Intent) intent);
+-                }
+-            }
+-        });
+-
+         XposedHelpers.findAndHookMethod(WebViewFactory.class, "getProvider", new XC_MethodReplacement() {
+             @Override
+             protected Object replaceHookedMethod(MethodHookParam param) {
+@@ -313,21 +299,6 @@ public class ParasiticManagerHooker {
+             XposedHelpers.findAndHookMethod(ActivityThread.class, "performDestroyActivity", IBinder.class, boolean.class, int.class, boolean.class, stateHooker);
+     }
+ 
+-    private static void checkIntent(ILSPManagerService managerService, Intent intent) {
+-        if (managerService == null) return;
+-        if (Process.myUid() != BuildConfig.MANAGER_INJECTED_UID) return;
+-        if (intent.getCategories() == null || !intent.getCategories().contains("org.lsposed.manager.LAUNCH_MANAGER")) {
+-            Hookers.logD("Launching the original app, restarting");
+-            try {
+-                managerService.restartFor(intent);
+-            } catch (RemoteException e) {
+-                Hookers.logE("restart failed", e);
+-            } finally {
+-                Process.killProcess(Process.myPid());
+-            }
+-        }
+-    }
+-
+ 
+     static public boolean start() {
+         List<IBinder> binder = new ArrayList<>(1);
+diff --git a/magisk-loader/src/main/java/org/lsposed/lspd/util/ParasiticManagerSystemHooker.java b/magisk-loader/src/main/java/org/lsposed/lspd/util/ParasiticManagerSystemHooker.java
+new file mode 100644
+index 00000000..c8d525e7
+--- /dev/null
++++ b/magisk-loader/src/main/java/org/lsposed/lspd/util/ParasiticManagerSystemHooker.java
+@@ -0,0 +1,77 @@
++package org.lsposed.lspd.util;
++
++import android.annotation.SuppressLint;
++import android.app.ProfilerInfo;
++import android.content.Intent;
++import android.content.pm.ActivityInfo;
++import android.content.pm.ResolveInfo;
++import android.util.Log;
++
++import org.lsposed.lspd.hooker.HandleSystemServerProcessHooker;
++import org.lsposed.lspd.impl.LSPosedHelper;
++import org.lsposed.lspd.service.BridgeService;
++
++import io.github.libxposed.api.XposedInterface;
++import io.github.libxposed.api.annotations.AfterInvocation;
++import io.github.libxposed.api.annotations.XposedHooker;
++
++public class ParasiticManagerSystemHooker implements HandleSystemServerProcessHooker.Callback {
++    public static void start() {
++        HandleSystemServerProcessHooker.callback = new ParasiticManagerSystemHooker();
++    }
++
++    /*@XposedHooker
++    private static class Hooker2 implements XposedInterface.Hooker {
++        @BeforeInvocation
++        public static void beforeHookedMethod(XposedInterface.BeforeHookCallback callback) throws Throwable {
++            Log.d("LSPosed", "checking new activity");
++            var self = callback.getThisObject();
++            if (self == null) return;
++            var request = XposedHelpers.getObjectField(self, "mRequest");
++            Log.d("LSPosed", "start activity intent=" + XposedHelpers.getObjectField(request, "intent") + " ai=" + XposedHelpers.getObjectField(request, "activityInfo"), new Throwable());
++        }
++    }*/
++
++    @XposedHooker
++    private static class Hooker implements XposedInterface.Hooker {
++        @AfterInvocation
++        public static void afterHookedMethod(XposedInterface.AfterHookCallback callback) throws Throwable {
++            Log.d("LSPosed", "checking new activity");
++            var intent = (Intent) callback.getArgs()[0];
++            Log.d("LSPosed", "intent=" + intent);
++            if (intent == null) return;
++            // TODO: keep sync with LSPManagerService getManagerIntent
++            if (!intent.hasCategory("org.lsposed.manager.LAUNCH_MANAGER")) return;
++            var aInfo = (ActivityInfo) callback.getResult();
++            if (aInfo == null || !"com.android.shell".equals(aInfo.packageName)) return;
++            aInfo.processName = "org.lsposed.manager";
++            aInfo.theme = android.R.style.Theme_Material_Light_NoActionBar;
++            aInfo.flags = aInfo.flags & ~(ActivityInfo.FLAG_EXCLUDE_FROM_RECENTS | ActivityInfo.FLAG_FINISH_ON_CLOSE_SYSTEM_DIALOGS);
++            BridgeService.getService().preStartManager();
++            Log.d("LSPosed", "replaced activity");
++        }
++    }
++
++    @SuppressLint("PrivateApi")
++    @Override
++    public void onSystemServerLoaded(ClassLoader classLoader) {
++        try {
++            Class<?> supervisorClass;
++            try {
++                supervisorClass = Class.forName("com.android.server.wm.ActivityTaskSupervisor", false, classLoader);
++            } catch (ClassNotFoundException ignore) {
++                supervisorClass = Class.forName("com.android.server.wm.ActivityStackSupervisor", false, classLoader);
++            }
++            LSPosedHelper.hookMethod(Hooker.class, supervisorClass, "resolveActivity", Intent.class, ResolveInfo.class, int.class, ProfilerInfo.class);
++            /*
++            for (var method: Class.forName("com.android.server.wm.ActivityStarter", false, classLoader).getDeclaredMethods()) {
++                if ("execute".equals(method.getName()))
++                    HookBridge.deoptimizeMethod(method);
++            }
++            LSPosedHelper.hookAllMethods(Hooker2.class, Class.forName("com.android.server.wm.ActivityStarter", false, classLoader), "execute");*/
++            Log.d("LSPosed", "hooked activity starter");
++        } catch (Throwable e) {
++            Log.e("LSPosed", "onSystemServerLoaded: ", e);
++        }
++    }
++}
+diff --git a/magisk-loader/src/main/jni/api/riru_main.cpp b/magisk-loader/src/main/jni/api/riru_main.cpp
+index 957c1488..60c4be6f 100644
+--- a/magisk-loader/src/main/jni/api/riru_main.cpp
++++ b/magisk-loader/src/main/jni/api/riru_main.cpp
+@@ -63,6 +63,7 @@ namespace lspd {
+                                                                  nice_name,
+                                                                  *start_child_zygote,
+                                                                  *_app_data_dir);
++            *_nice_name = nice_name;
+         }
+ 
+         void nativeForkAndSpecializePost(JNIEnv *env, jclass, jint res) {
+diff --git a/magisk-loader/src/main/jni/src/magisk_loader.cpp b/magisk-loader/src/main/jni/src/magisk_loader.cpp
+index 184d1d94..3b03e04a 100644
+--- a/magisk-loader/src/main/jni/src/magisk_loader.cpp
++++ b/magisk-loader/src/main/jni/src/magisk_loader.cpp
+@@ -37,6 +37,7 @@ static_assert(FS_IOC_SETFLAGS == LP_SELECT(0x40046602, 0x40086602));
+ 
+ namespace lspd {
+     extern int *allowUnload;
++    jboolean is_parasitic_manager = JNI_FALSE;
+ 
+     constexpr int FIRST_ISOLATED_UID = 99000;
+     constexpr int LAST_ISOLATED_UID = 99999;
+@@ -114,52 +115,55 @@ namespace lspd {
+             close(dex_fd);
+             instance->HookBridge(*this, env);
+ 
+-            if (application_binder) {
+-                lsplant::InitInfo initInfo{
+-                    .inline_hooker = [](auto t, auto r) {
+-                        void* bk = nullptr;
+-                        return HookFunction(t, r, &bk) == RS_SUCCESS ? bk : nullptr;
+-                    },
+-                    .inline_unhooker = [](auto t) {
+-                        return UnhookFunction(t) == RT_SUCCESS ;
+-                    },
+-                    .art_symbol_resolver = [](auto symbol) {
+-                        return GetArt()->getSymbAddress(symbol);
+-                    },
+-                    .art_symbol_prefix_resolver = [](auto symbol) {
+-                        return GetArt()->getSymbPrefixFirstAddress(symbol);
+-                    },
+-                };
+-                InitArtHooker(env, initInfo);
+-                InitHooks(env);
+-                SetupEntryClass(env);
+-                FindAndCall(env, "forkCommon",
+-                            "(ZLjava/lang/String;Ljava/lang/String;Landroid/os/IBinder;)V",
+-                            JNI_TRUE, JNI_NewStringUTF(env, "system"), nullptr, application_binder);
+-                GetArt(true);
+-            } else {
+-                LOGI("skipped system server");
+-                GetArt(true);
+-            }
++            // always inject into system server
++            lsplant::InitInfo initInfo{
++                .inline_hooker = [](auto t, auto r) {
++                    void* bk = nullptr;
++                    return HookFunction(t, r, &bk) == RS_SUCCESS ? bk : nullptr;
++                },
++                .inline_unhooker = [](auto t) {
++                    return UnhookFunction(t) == RT_SUCCESS ;
++                },
++                .art_symbol_resolver = [](auto symbol) {
++                    return GetArt()->getSymbAddress(symbol);
++                },
++                .art_symbol_prefix_resolver = [](auto symbol) {
++                    return GetArt()->getSymbPrefixFirstAddress(symbol);
++                },
++            };
++            InitArtHooker(env, initInfo);
++            InitHooks(env);
++            SetupEntryClass(env);
++            FindAndCall(env, "forkCommon",
++                        "(ZLjava/lang/String;Ljava/lang/String;Landroid/os/IBinder;)V",
++                        JNI_TRUE, JNI_NewStringUTF(env, "system"), nullptr, application_binder, is_parasitic_manager);
++            GetArt(true);
+         }
+     }
+ 
+     void MagiskLoader::OnNativeForkAndSpecializePre(JNIEnv *env,
+                                                jint uid,
+                                                jintArray &gids,
+-                                               jstring nice_name,
++                                               jstring &nice_name,
+                                                jboolean is_child_zygote,
+                                                jstring app_data_dir) {
++        jboolean is_manager = JNI_FALSE;
+         if (uid == kAidInjected) {
+-            int array_size = gids ? env->GetArrayLength(gids) : 0;
+-            auto region = std::make_unique<jint[]>(array_size + 1);
+-            auto *new_gids = env->NewIntArray(array_size + 1);
+-            if (gids) env->GetIntArrayRegion(gids, 0, array_size, region.get());
+-            region.get()[array_size] = kAidInet;
+-            env->SetIntArrayRegion(new_gids, 0, array_size + 1, region.get());
+-            if (gids) env->SetIntArrayRegion(gids, 0, 1, region.get() + array_size);
+-            gids = new_gids;
++            const JUTFString name(env, nice_name);
++            if (name.get() == "org.lsposed.manager"sv) {
++                int array_size = gids ? env->GetArrayLength(gids) : 0;
++                auto region = std::make_unique<jint[]>(array_size + 1);
++                auto *new_gids = env->NewIntArray(array_size + 1);
++                if (gids) env->GetIntArrayRegion(gids, 0, array_size, region.get());
++                region.get()[array_size] = kAidInet;
++                env->SetIntArrayRegion(new_gids, 0, array_size + 1, region.get());
++                if (gids) env->SetIntArrayRegion(gids, 0, 1, region.get() + array_size);
++                gids = new_gids;
++                nice_name = JNI_NewStringUTF(env, "com.android.shell").release();
++                is_manager = JNI_TRUE;
++            }
+         }
++        is_parasitic_manager = is_manager;
+         Service::instance()->InitService(env);
+         const auto app_id = uid % PER_USER_RANGE;
+         JUTFString process_name(env, nice_name);
+@@ -187,6 +191,7 @@ namespace lspd {
+     MagiskLoader::OnNativeForkAndSpecializePost(JNIEnv *env, jstring nice_name, jstring app_dir) {
+         const JUTFString process_name(env, nice_name);
+         auto *instance = Service::instance();
++        if (is_parasitic_manager) nice_name = JNI_NewStringUTF(env, "org.lsposed.manager").release();
+         auto binder = skip_ ? ScopedLocalRef<jobject>{env, nullptr}
+                             : instance->RequestBinder(env, nice_name);
+         if (binder) {
+diff --git a/magisk-loader/src/main/jni/src/magisk_loader.h b/magisk-loader/src/main/jni/src/magisk_loader.h
+index b089a3c8..51600f37 100644
+--- a/magisk-loader/src/main/jni/src/magisk_loader.h
++++ b/magisk-loader/src/main/jni/src/magisk_loader.h
+@@ -36,7 +36,7 @@ namespace lspd {
+             return static_cast<MagiskLoader*>(instance_.get());
+         }
+ 
+-        void OnNativeForkAndSpecializePre(JNIEnv *env, jint uid, jintArray &gids, jstring nice_name,
++        void OnNativeForkAndSpecializePre(JNIEnv *env, jint uid, jintArray &gids, jstring &nice_name,
+                                           jboolean is_child_zygote, jstring app_data_dir);
+ 
+         void OnNativeForkAndSpecializePost(JNIEnv *env, jstring nice_name, jstring app_dir);
+diff --git a/magisk-loader/src/main/jni/src/service.cpp b/magisk-loader/src/main/jni/src/service.cpp
+index 16e752fd..109553b8 100644
+--- a/magisk-loader/src/main/jni/src/service.cpp
++++ b/magisk-loader/src/main/jni/src/service.cpp
+@@ -95,25 +95,6 @@ namespace lspd {
+                                                instance()->exec_transact_replace_methodID_,
+                                                obj, code, data_obj, reply_obj, flags);
+             return true;
+-        } else if (SET_ACTIVITY_CONTROLLER_CODE != -1 &&
+-                   code == SET_ACTIVITY_CONTROLLER_CODE) [[unlikely]] {
+-            va_copy(copy, args);
+-            if (instance()->replace_activity_controller_methodID_) {
+-                *res = JNI_CallStaticBooleanMethod(env, instance()->bridge_service_class_,
+-                                                   instance()->replace_activity_controller_methodID_,
+-                                                   obj, code, data_obj, reply_obj, flags);
+-            }
+-            va_end(copy);
+-            // fallback the backup
+-        } else if (code == (('_' << 24) | ('C' << 16) | ('M' << 8) | 'D')) {
+-            va_copy(copy, args);
+-            if (instance()->replace_shell_command_methodID_) {
+-                *res = JNI_CallStaticBooleanMethod(env, instance()->bridge_service_class_,
+-                                                   instance()->replace_shell_command_methodID_,
+-                                                   obj, code, data_obj, reply_obj, flags);
+-            }
+-            va_end(copy);
+-            return *res;
+         }
+         return false;
+     }
+@@ -247,21 +228,6 @@ namespace lspd {
+             return;
+         }
+ 
+-
+-        replace_activity_controller_methodID_ = JNI_GetStaticMethodID(env, bridge_service_class_,
+-                                                                      "replaceActivityController",
+-                                                                      hooker_sig);
+-        if (!replace_activity_controller_methodID_) {
+-            LOGE("replaceActivityShell class not found");
+-        }
+-
+-        replace_shell_command_methodID_ = JNI_GetStaticMethodID(env, bridge_service_class_,
+-                                                                "replaceShellCommand",
+-                                                                hooker_sig);
+-        if (!replace_shell_command_methodID_) {
+-            LOGE("replaceShellCommand class not found");
+-        }
+-
+         auto binder_class = JNI_FindClass(env, "android/os/Binder");
+         exec_transact_backup_methodID_ = JNI_GetMethodID(env, binder_class, "execTransact",
+                                                          "(IJJI)Z");
+diff --git a/magisk-loader/src/main/jni/src/service.h b/magisk-loader/src/main/jni/src/service.h
+index d2186370..670e7112 100644
+--- a/magisk-loader/src/main/jni/src/service.h
++++ b/magisk-loader/src/main/jni/src/service.h
+@@ -107,8 +107,6 @@ namespace lspd {
+ 
+         jclass bridge_service_class_ = nullptr;
+         jmethodID exec_transact_replace_methodID_ = nullptr;
+-        jmethodID replace_activity_controller_methodID_ = nullptr;
+-        jmethodID replace_shell_command_methodID_ = nullptr;
+ 
+         jclass binder_class_ = nullptr;
+         jmethodID binder_ctor_ = nullptr;
+diff --git a/services/daemon-service/src/main/aidl/org/lsposed/lspd/service/ILSPosedService.aidl b/services/daemon-service/src/main/aidl/org/lsposed/lspd/service/ILSPosedService.aidl
+index fd79b068..4dff667c 100644
+--- a/services/daemon-service/src/main/aidl/org/lsposed/lspd/service/ILSPosedService.aidl
++++ b/services/daemon-service/src/main/aidl/org/lsposed/lspd/service/ILSPosedService.aidl
+@@ -7,5 +7,7 @@ interface ILSPosedService {
+ 
+     oneway void dispatchSystemServerContext(in IBinder activityThread, in IBinder activityToken, String api);
+ 
+-    boolean preStartManager(String pkgName, in Intent intent);
++    boolean preStartManager();
++
++    boolean setManagerEnabled(boolean enabled);
+ }
+-- 
+2.45.2
+

@@ -1,0 +1,25 @@
+From 47a6630d85a33ef37b660cb2e99e7de2ffea0f7a Mon Sep 17 00:00:00 2001
+From: 5ec1cff <ewtqyqyewtqyqy@gmail.com>
+Date: Thu, 8 Feb 2024 23:14:38 +0800
+Subject: [PATCH 06/11] temporary fix for A14 QPR3
+
+---
+ .../main/java/org/lsposed/lspd/util/ParasiticManagerHooker.java | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/magisk-loader/src/main/java/org/lsposed/lspd/util/ParasiticManagerHooker.java b/magisk-loader/src/main/java/org/lsposed/lspd/util/ParasiticManagerHooker.java
+index 7b8d52cc..da1bc833 100644
+--- a/magisk-loader/src/main/java/org/lsposed/lspd/util/ParasiticManagerHooker.java
++++ b/magisk-loader/src/main/java/org/lsposed/lspd/util/ParasiticManagerHooker.java
+@@ -79,6 +79,8 @@ public class ParasiticManagerHooker {
+                 }
+                 HiddenApiBridge.ApplicationInfo_resourceDirs(newAppInfo, HiddenApiBridge.ApplicationInfo_resourceDirs(appInfo));
+                 newAppInfo.uid = appInfo.uid;
++                // FIXME: It seems the parsed flags is incorrect (0) on A14 QPR3
++                newAppInfo.flags = newAppInfo.flags | ApplicationInfo.FLAG_HAS_CODE;
+             } catch (Throwable e) {
+                 Utils.logE("get manager pkginfo", e);
+             }
+-- 
+2.45.2
+

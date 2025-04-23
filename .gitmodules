@@ -19,5 +19,5 @@
 	branch = master
 [submodule "libxposed/service"]
 	path = libxposed/service
-	url = https://github.com/DanGLES3/service.git
+	url = https://github.com/libxposed/service.git
 	branch = master

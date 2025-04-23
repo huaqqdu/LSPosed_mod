@@ -1,28 +1,15 @@
 [submodule "services/xposed-service"]
 	path = services/xposed-service
-	url = https://github.com/pumPCin/XposedService.git
-	branch = main
+	url = https://github.com/mywalkb/XposedService.git
 [submodule "external/lsplant"]
 	path = external/lsplant
-	url = https://github.com/pumPCin/LSPlant.git
-	branch = main
+	url = https://github.com/mywalkb/LSPlant_mod.git
 [submodule "external/dobby"]
 	path = external/dobby
-	url = https://github.com/pumPCin/Dobby.git
-	branch = master
+	url = https://github.com/LSPosed/Dobby.git
 [submodule "external/fmt"]
 	path = external/fmt
-	url = https://github.com/pumPCin/fmt.git
-	branch = master
+	url = https://github.com/fmtlib/fmt.git
 [submodule "external/cxx"]
 	path = external/cxx
-	url = https://github.com/pumPCin/libcxx.git
-	branch = master
-[submodule "libxposed/api"]
-	path = libxposed/api
-	url = https://github.com/pumPCin/api.git
-	branch = master
-[submodule "libxposed/service"]
-	path = libxposed/service
-	url = https://github.com/pumPCin/service.git
-	branch = master
+	url = https://github.com/topjohnwu/libcxx.git
